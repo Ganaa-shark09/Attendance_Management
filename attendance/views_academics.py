@@ -86,6 +86,10 @@ class TeacherAttendanceViewSet(viewsets.GenericViewSet):
         if session.is_closed:
             return Response({"detail":"Session is closed"}, status=400)
 
+        valid_student_ids = set(Enrollment.objects
+            .filter(section=session.section)
+            .values_list("student_id", flat=True))    
+
         # validate students are enrolled in section
         valid_student_ids = set(Enrollment.objects.filter(section=session.section).values_list("student_id", flat=True))
         created = 0
@@ -110,6 +114,7 @@ class TeacherAttendanceViewSet(viewsets.GenericViewSet):
         session.is_closed = True
         session.end_time = timezone.now()
         session.save(update_fields=["is_closed","end_time"])
+        session.close_and_fill_absent()
         return Response(AttendanceSessionSerializer(session).data)
 
     @action(detail=False, methods=["get"])
@@ -155,8 +160,45 @@ class TeacherAttendanceViewSet(viewsets.GenericViewSet):
             "section_id": int(section_id),
             "total_sessions": total_sessions,
             "students": result,
-        })    
+        })  
 
+    @action(detail=False, methods=["get"])
+    def roster(self, request):
+        """
+        ?section_id=ID → returns the enrolled students for that section.
+        Only available to teachers assigned to the section.
+        """
+        section_id = request.query_params.get("section_id")
+        if not section_id:
+            return Response({"detail": "section_id required"}, status=400)
+
+        # must teach this section
+        if not TeachingAssignment.objects.filter(teacher=request.user, section_id=section_id).exists():
+            return Response({"detail": "Not assigned to this section"}, status=403)
+
+        enrollments = (
+            Enrollment.objects
+            .filter(section_id=section_id)
+            .select_related("student")
+            .order_by("student__roll_number", "student__username")
+        )
+
+        students = []
+        for e in enrollments:
+            s = e.student
+            students.append({
+                "student_id": s.id,
+                "username": s.username,
+                "name": f"{(s.first_name or '').strip()} {(s.last_name or '').strip()}".strip() or s.username,
+                "roll_number": getattr(s, "roll_number", "") or "",
+                "email": s.email,
+            })
+
+        return Response({
+            "section_id": int(section_id),
+            "count": len(students),
+            "students": students,
+        })      
 
     @action(detail=False, methods=["get"])
     def session_marks(self, request):

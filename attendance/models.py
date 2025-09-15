@@ -1,6 +1,6 @@
 # attendance/models.py
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 # ----- Core (optional, for company/teams) -----
@@ -68,6 +68,36 @@ class AttendanceSession(models.Model):
     end_time = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="created_sessions")
     is_closed = models.BooleanField(default=False)
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["section", "date"],
+                name="unique_section_date"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["section", "date"]),
+        ]
+
+    def close_and_fill_absent(self):
+        from .models import Enrollment, AttendanceMark  # local import to avoid cycles
+        if self.is_closed:
+            return
+        with transaction.atomic():
+            enrolled_ids = set(Enrollment.objects
+                                .filter(section=self.section)
+                                .values_list("student_id", flat=True))
+            marked_ids = set(AttendanceMark.objects
+                                .filter(session=self)
+                                .values_list("student_id", flat=True))
+            missing = enrolled_ids - marked_ids
+            AttendanceMark.objects.bulk_create(
+                [AttendanceMark(session=self, student_id=sid, status="absent")
+                    for sid in missing]
+            )
+            self.is_closed = True
+            self.end_time = timezone.now()
+            self.save(update_fields=["is_closed", "end_time"])
 
 class AttendanceMark(models.Model):
     PRESENT, ABSENT, LATE, EXCUSED = "present", "absent", "late", "excused"
@@ -78,3 +108,7 @@ class AttendanceMark(models.Model):
     marked_at = models.DateTimeField(auto_now_add=True)
     class Meta:
         unique_together = ("session", "student")
+        indexes = [
+            models.Index(fields=["session", "student"]),
+            models.Index(fields=["student"]),
+        ]
